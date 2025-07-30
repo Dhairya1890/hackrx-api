@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Request
 import uvicorn
 from claim_process import process_claim
-
+from pydantic import BaseModel
 app = FastAPI()
 
 @app.post("/query")
