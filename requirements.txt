@@ -8,3 +8,4 @@ langchain-pinecone
 langchain-community
 python-dotenv
 tqdm
+python-multipart
