@@ -2,7 +2,8 @@ fastapi
 uvicorn
 requests
 google-generativeai
-pinecone-client
+pinecone
 langchain
 python-dotenv
-
+tqdm
+pypdf

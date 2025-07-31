@@ -1,5 +1,40 @@
-.venv
-venv
-.env
-.log
+# Python cache & compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Jupyter Notebook checkpoints
 .ipynb_checkpoints/
+
+# Environment and secrets
+.env
+*.env
+
+# Virtual environment folders
+venv/
+.venv/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary or build files
+*.tmp
+*.bak
+*.swp
+dist/
+build/
+
+# IDE-specific
+.vscode/
+.idea/
+
+# Uploads or large files
+uploads/
+data/
+*.pdf

@@ -67,7 +67,7 @@ def retrieve_chunks(query, top_k=5):
 def ask_gemini(query: str):
     try:
         from google.generativeai import GenerativeModel
-        llm = GenerativeModel("gemini-2.5-pro")
+        llm = GenerativeModel("gemini-2.0-flash-exp")
 
         chunks = retrieve_chunks(query)
         context = "\n".join(chunks)
