@@ -6,34 +6,7 @@ import os
 from dotenv import load_dotenv
 from claim_process import process_claim
 
-# Load environment variables
-load_dotenv()
-
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://eos5psqf4l1yvrg.m.pipedream.net")
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-app = FastAPI(title="Insurance Query API", version="1.0.0")
-
-@app.get("/")
-async def root():
-    return {"message": "Insurance Query API is running", "status": "healthy"}
-
-@app.get("/health")
-async def health_check():
-    try:
-        gemini_key = os.getenv("GEMINI_API_KEY")
-        pinecone_key = os.getenv("PINECONE_API_KEY")
-        return {
-            "status": "healthy",
-            "gemini_configured": bool(gemini_key),
-            "pinecone_configured": bool(pinecone_key)
-        }
-    except Exception as e:
-        logger.error(f"Health check failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Health check failed: {e}")
+app = FastAPI()
 
 @app.post("/query")
 async def handle_query(request: Request):
@@ -64,4 +37,4 @@ async def handle_query(request: Request):
         raise HTTPException(status_code=500, detail=f"Internal server error: {e}")
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=10000)

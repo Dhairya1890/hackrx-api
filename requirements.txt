@@ -4,6 +4,7 @@ requests
 google-generativeai
 pinecone
 langchain
+langchain-community
 python-dotenv
 tqdm
 pypdf
