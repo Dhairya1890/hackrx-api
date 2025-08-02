@@ -1,105 +1,79 @@
-from fastapi import FastAPI, Request, UploadFile, File, Form, BackgroundTasks, HTTPException
-import uvicorn
-import logging
 import os
+import logging
 import requests
+from fastapi import FastAPI, Request, HTTPException, Header
 from dotenv import load_dotenv
-from claim_process import process_claim, process_uploaded_docs
+from pipeline import process_uploaded_docs, process_claim  # ✅ using your pipeline functions
 
 load_dotenv()
 
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://eos5psqf4l1yvrg.m.pipedream.net")
+# 🔹 Load expected Bearer token from environment
+EXPECTED_BEARER = os.getenv("TEAM_BEARER_TOKEN")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Insurance Query API", version="1.1.0")
-
-# ✅ Background worker to handle processing
-def background_process(query: str, files: list, session_id: str):
-    try:
-        namespace = session_id or "default"
-
-        # ✅ Step 1: If files are uploaded, save & embed
-        if files:
-            file_paths = []
-            for uploaded in files:
-                path = f"/tmp/{uploaded.filename}"
-                with open(path, "wb") as f:
-                    f.write(uploaded.file.read())
-                file_paths.append(path)
-
-            process_uploaded_docs(file_paths, namespace=namespace)
-
-        # ✅ Step 2: Process claim
-        decision_json = process_claim(query, namespace=namespace)
-
-        # ✅ Step 3: Send result to webhook
-        requests.post(WEBHOOK_URL, json=decision_json)
-        logger.info("✅ Process completed and sent to webhook")
-
-    except Exception as e:
-        logger.error(f"Background processing failed: {e}")
+app = FastAPI(title="HackRx LLM Retrieval API", version="2.0.0")
 
 
+# ✅ Root & Health Check
 @app.get("/")
 async def root():
-    return {"message": "Insurance Query API is running", "status": "healthy"}
+    return {"message": "HackRx Retrieval API is running", "status": "healthy"}
 
 
-@app.post("/query")
-async def handle_query(
-    background_tasks: BackgroundTasks,
-    query: str = Form(...),
-    session_id: str = Form("default"),
-    files: list[UploadFile] = File(default=[])
-):
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "message": "API ready"}
+
+
+# ✅ 🔥 Main Endpoint required by HackRx: /api/v1/hackrx/run
+@app.post("/api/v1/hackrx/run")
+async def hackrx_run(request: Request, authorization: str = Header(None)):
     try:
-        logger.info(f"📥 Received query: {query[:100]}...")
-        background_tasks.add_task(background_process, query, files, session_id)
+        # 🔹 Step 1: Authenticate using Bearer token
+        if authorization != f"Bearer {EXPECTED_BEARER}":
+            logger.warning("Unauthorized request detected")
+            raise HTTPException(status_code=401, detail="Unauthorized")
 
-        return {"status": "processing", "message": "Your request is being processed asynchronously."}
-
-    except Exception as e:
-        logger.error(f"❌ Query handling failed: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-
-@app.post("/hackrx/run")
-async def hackrx_run(request: Request, background_tasks: BackgroundTasks):
-    """
-    Judges will hit this endpoint with a JSON payload:
-    {
-      "documents": "<url>",
-      "questions": ["Q1", "Q2"]
-    }
-    """
-    try:
+        # 🔹 Step 2: Parse incoming JSON
         data = await request.json()
-        doc_url = data.get("documents")
+        document_url = data.get("documents")
         questions = data.get("questions", [])
-        namespace = "judge-doc"
 
-        if doc_url:
-            # ✅ Download the document temporarily
-            file_path = "/tmp/judge_policy.pdf"
-            resp = requests.get(doc_url)
-            with open(file_path, "wb") as f:
+        if not document_url or not questions:
+            raise HTTPException(status_code=400, detail="Missing 'documents' or 'questions' field")
+
+        # 🔹 Step 3: Download document
+        local_path = "/tmp/policy.pdf"
+        try:
+            resp = requests.get(document_url, timeout=20)
+            with open(local_path, "wb") as f:
                 f.write(resp.content)
+            logger.info(f"Downloaded document from {document_url}")
+        except Exception as e:
+            logger.error(f"Failed to download document: {e}")
+            raise HTTPException(status_code=500, detail="Failed to download document")
 
-            # ✅ Embed document asynchronously
-            background_tasks.add_task(process_uploaded_docs, [file_path], namespace)
+        # 🔹 Step 4: Embed the document (new namespace for each request)
+        namespace = "hackrx_test"
+        process_uploaded_docs([local_path], namespace=namespace)
 
-        # ✅ Process questions asynchronously
+        # 🔹 Step 5: Process each question using RAG pipeline
+        answers = []
         for q in questions:
-            background_tasks.add_task(background_process, q, [], namespace)
+            try:
+                decision_json = process_claim(q, namespace=namespace)
+                # Ensure proper string or dict output
+                answers.append(decision_json if isinstance(decision_json, str) else str(decision_json))
+            except Exception as e:
+                answers.append(f"Error processing question: {str(e)}")
 
-        return {"status": "processing", "message": "Document and queries are being processed."}
+        # 🔹 Step 6: Return in required JSON format
+        return {"answers": answers}
 
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"❌ HackRx run failed: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+        logger.error(f"Error in /api/v1/hackrx/run: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal Server Error: {e}")
