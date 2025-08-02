@@ -1,125 +1,94 @@
 import os
-import json
-import logging
-import google.generativeai as genai
-from pinecone import Pinecone
-from langchain.vectorstores import Pinecone as PineconeStore
-from langchain.schema import Document
+from dotenv import load_dotenv
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.document_loaders import PyPDFLoader, TextLoader
+from langchain_pinecone import PineconeVectorStore
+from pinecone import Pinecone, ServerlessSpec
+from pipeline import GeminiEmbeddings, llm
 
-# Configure logging
-logger = logging.getLogger(__name__)
+load_dotenv()
 
-# 🔹 Configure Gemini
-try:
-    gemini_api_key = os.getenv("GEMINI_API_KEY")
-    if not gemini_api_key:
-        raise ValueError("GEMINI_API_KEY environment variable is not set")
-    genai.configure(api_key=gemini_api_key)
-    logger.info("Gemini configured successfully")
-except Exception as e:
-    logger.error(f"Failed to configure Gemini: {str(e)}")
-    raise
+# ✅ Pinecone Setup
+pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+index_name = "hackrxvector"
 
-# 🔹 Initialize Pinecone
-try:
-    pinecone_api_key = os.getenv("PINECONE_API_KEY")
-    if not pinecone_api_key:
-        raise ValueError("PINECONE_API_KEY environment variable is not set")
-    
-    pc = Pinecone(api_key=pinecone_api_key)
-    index_name = "hackrxvector"
-    index = pc.Index(index_name)
-    logger.info("Pinecone initialized successfully")
-except Exception as e:
-    logger.error(f"Failed to initialize Pinecone: {str(e)}")
-    raise
+# Create index if not exists
+if index_name not in [i.name for i in pc.list_indexes()]:
+    pc.create_index(
+        name=index_name,
+        dimension=768,
+        metric="cosine",
+        spec=ServerlessSpec(cloud="aws", region="us-east-1")
+    )
 
-# 🔹 Gemini wrapper for embeddings
-from langchain.embeddings.base import Embeddings
-
-class GeminiEmbeddings(Embeddings):
-    def embed_query(self, text: str):
-        try:
-            return genai.embed_content(model="embedding-001", content=text)["embedding"]
-        except Exception as e:
-            logger.error(f"Embedding generation failed: {str(e)}")
-            raise
-
-    def embed_documents(self, texts):
-        return [self.embed_query(t) for t in texts]
-
+index = pc.Index(index_name)
 embedding_model = GeminiEmbeddings()
 
-# 🔹 Retrieve relevant chunks
-def retrieve_chunks(query, top_k=5):
-    try:
-        logger.info(f"Retrieving chunks for query: {query[:50]}...")
-        query_vector = embedding_model.embed_query(query)
-        results = index.query(vector=query_vector, top_k=top_k, include_metadata=True)
-        chunks = [match["metadata"]["text"] for match in results["matches"]]
-        logger.info(f"Retrieved {len(chunks)} chunks")
-        return chunks
-    except Exception as e:
-        logger.error(f"Failed to retrieve chunks: {str(e)}")
-        raise
 
-# 🔹 Ask Gemini to generate decision
-def ask_gemini(query: str):
-    try:
-        from google.generativeai import GenerativeModel
-        llm = GenerativeModel("gemini-2.0-flash-exp")
+# ✅ Helper: Check if namespace already has data
+def namespace_exists(namespace: str) -> bool:
+    stats = index.describe_index_stats()
+    return stats["namespaces"].get(namespace, {}).get("vector_count", 0) > 0
 
-        chunks = retrieve_chunks(query)
-        context = "\n".join(chunks)
 
-        prompt = f"""
-        You are an insurance Expert.
-        Analyze the user's query using ONLY the given policy context and respond with ONLY a valid JSON object (no markdown, no code blocks):
+# ✅ Process uploaded documents
+def process_uploaded_docs(file_paths, namespace="default"):
+    """
+    Loads, chunks, embeds, and stores documents in Pinecone.
+    Skips processing if namespace already exists.
+    """
+    if namespace_exists(namespace):
+        print(f"ℹ️ Namespace '{namespace}' already has data. Skipping embedding.")
+        return
 
-        {{
-          "Decision": "approved" or "rejected",
-          "Amount": "<approved amount or null>",
-          "Justification": "<short reason for the decision>",
-          "Clauses": ["<relevant clause 1>", "<relevant clause 2>"]
-        }}
+    all_docs = []
+    for path in file_paths:
+        if path.endswith(".pdf"):
+            loader = PyPDFLoader(path)
+        else:
+            loader = TextLoader(path)
+        docs = loader.load()
+        all_docs.extend(docs)
 
-        Context:
-        {context}
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+    chunks = splitter.split_documents(all_docs)
 
-        Query: "{query}"
+    vectorstore = PineconeVectorStore(index, embedding_model, text_key="text", namespace=namespace)
+    vectorstore.add_documents(chunks)
+    print(f"✅ Uploaded {len(chunks)} chunks to Pinecone namespace: {namespace}")
 
-        Respond with ONLY the JSON object, no additional text or formatting.
-        """
 
-        logger.info("Generating response with Gemini...")
-        response = llm.generate_content(prompt)
-        logger.info("Gemini response generated successfully")
-        return response.text.strip()
-    except Exception as e:
-        logger.error(f"Failed to generate Gemini response: {str(e)}")
-        raise
+# ✅ Retrieve relevant chunks
+def retrieve_chunks(query, namespace="default", top_k=5):
+    query_vector = embedding_model.embed_query(query)
+    results = index.query(namespace=namespace, vector=query_vector, top_k=top_k, include_metadata=True)
+    return [match["metadata"]["text"] for match in results["matches"]]
 
-# 🔹 Main function to be used by FastAPI
-def process_claim(query: str):
-    try:
-        logger.info(f"Processing claim query: {query[:50]}...")
-        decision = ask_gemini(query)
-        try:
-            # Clean up Gemini's response - remove markdown code blocks if present
-            cleaned_response = decision.strip()
-            if cleaned_response.startswith("```json"):
-                cleaned_response = cleaned_response[7:]  # Remove ```json
-            if cleaned_response.endswith("```"):
-                cleaned_response = cleaned_response[:-3]  # Remove ```
-            cleaned_response = cleaned_response.strip()
-            
-            parsed_decision = json.loads(cleaned_response)
-            logger.info("Successfully parsed JSON response")
-            return parsed_decision
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse JSON response: {str(e)}")
-            logger.error(f"Raw response: {decision}")
-            return {"error": "Invalid JSON from Gemini", "raw": decision}
-    except Exception as e:
-        logger.error(f"Claim processing failed: {str(e)}")
-        return {"error": f"Processing failed: {str(e)}"}
+
+# ✅ Process claim with context
+def process_claim(query, namespace="default"):
+    """
+    Retrieves relevant context from Pinecone and asks Gemini for structured decision.
+    """
+    chunks = retrieve_chunks(query, namespace=namespace)
+    context = "\n".join(chunks)
+
+    prompt = f"""
+    You are an insurance Expert. Use ONLY the following context to answer the question.
+
+    Context:
+    {context}
+
+    Query: {query}
+
+    Respond strictly in JSON format:
+    {{
+      "Decision": "approved" or "rejected",
+      "Amount": "<approved amount or null>",
+      "Justification": "<short reason>",
+      "Clauses": ["<clause1>", "<clause2>"]
+    }}
+    """
+
+    response = llm.generate_content(prompt).text.strip()
+    return response
