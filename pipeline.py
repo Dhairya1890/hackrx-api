@@ -1,86 +1,45 @@
 import os
 from dotenv import load_dotenv
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.document_loaders import PyPDFLoader, TextLoader
-from langchain_pinecone import PineconeVectorStore
 from pinecone import Pinecone, ServerlessSpec
-from langchain.embeddings.base import Embeddings
-import google.generativeai as genai
-from google.generativeai import GenerativeModel
+from langchain_pinecone import PineconeVectorStore
+from pipeline import GeminiEmbeddings
 
 load_dotenv()
-
-# ✅ Configure Gemini
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-llm = GenerativeModel("gemini-2.5-pro")
-
-class GeminiEmbeddings(Embeddings):
-    def embed_query(self, text: str):
-        return genai.embed_content(model="embedding-001", content=text)["embedding"]
-
-    def embed_documents(self, texts):
-        return [self.embed_query(t) for t in texts]
 
 # ✅ Pinecone Setup
 pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 index_name = "hackrxvector"
 
-if index_name not in [i.name for i in pc.list_indexes()]:
+# ✅ Detect embedding dimension dynamically
+def get_embedding_dimension(embedding_model):
+    """Generate a dummy embedding to detect dimension."""
+    test_vector = embedding_model.embed_query("test")
+    return len(test_vector)
+
+embedding_model = GeminiEmbeddings()
+expected_dim = get_embedding_dimension(embedding_model)
+
+# ✅ Check index dimension (Do NOT delete in production)
+index_exists = any(i.name == index_name for i in pc.list_indexes())
+if index_exists:
+    stats = pc.describe_index(index_name)
+    current_dim = getattr(stats, 'dimension', None)
+
+    if current_dim and current_dim != expected_dim:
+        # ❗ Just log warning, do not delete
+        print(f"🚨 Dimension mismatch detected!")
+        print(f"➡️ Index '{index_name}' uses {current_dim}, but embeddings expect {expected_dim}.")
+        print("❗ Please recreate the index manually with the correct dimension.")
+else:
+    # ✅ Create index if missing
     pc.create_index(
         name=index_name,
-        dimension=768,
+        dimension=expected_dim,
         metric="cosine",
         spec=ServerlessSpec(cloud="aws", region="us-east-1")
     )
+    print(f"✅ Created Pinecone index '{index_name}' with dimension {expected_dim}")
 
+# ✅ Connect to index
 index = pc.Index(index_name)
-embedding_model = GeminiEmbeddings()
-
-# ✅ Process uploaded documents
-def process_uploaded_docs(file_paths, namespace="default"):
-    all_docs = []
-    for path in file_paths:
-        if path.endswith(".pdf"):
-            loader = PyPDFLoader(path)
-        else:
-            loader = TextLoader(path)
-        docs = loader.load()
-        all_docs.extend(docs)
-
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-    chunks = splitter.split_documents(all_docs)
-
-    vectorstore = PineconeVectorStore(index, embedding_model, text_key="text", namespace=namespace)
-    vectorstore.add_documents(chunks)
-    print(f"✅ Uploaded {len(chunks)} chunks to Pinecone namespace: {namespace}")
-
-# ✅ Retrieve relevant chunks
-def retrieve_chunks(query, namespace="default", top_k=5):
-    query_vector = embedding_model.embed_query(query)
-    results = index.query(namespace=namespace, vector=query_vector, top_k=top_k, include_metadata=True)
-    return [match["metadata"]["text"] for match in results["matches"]]
-
-# ✅ Process claim with context
-def process_claim(query, namespace="default"):
-    chunks = retrieve_chunks(query, namespace=namespace)
-    context = "\n".join(chunks)
-
-    prompt = f"""
-    You are an insurance Expert. Use ONLY the following context to answer the question.
-
-    Context:
-    {context}
-
-    Query: {query}
-
-    Respond strictly in JSON format:
-    {{
-      "Decision": "approved" or "rejected",
-      "Amount": "<approved amount or null>",
-      "Justification": "<short reason>",
-      "Clauses": ["<clause1>", "<clause2>"]
-    }}
-    """
-
-    response = llm.generate_content(prompt).text.strip()
-    return response  # should be valid JSON
+vectorstore = PineconeVectorStore(index, embedding_model, text_key="text")
