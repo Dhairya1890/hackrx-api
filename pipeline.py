@@ -2,7 +2,6 @@ import os
 from dotenv import load_dotenv
 from pinecone import Pinecone, ServerlessSpec
 from langchain_pinecone import PineconeVectorStore
-from pipeline import GeminiEmbeddings
 
 load_dotenv()
 
