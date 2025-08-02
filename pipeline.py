@@ -2,43 +2,24 @@ import os
 from dotenv import load_dotenv
 from pinecone import Pinecone, ServerlessSpec
 from langchain_pinecone import PineconeVectorStore
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.document_loaders import PyPDFLoader, TextLoader
+import google.generativeai as genai
+from langchain.embeddings.base import Embeddings
 
 load_dotenv()
 
-# ✅ Pinecone Setup
-pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-index_name = "hackrxvector"
+# ✅ Define Gemini Embeddings Here
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
-# ✅ Detect embedding dimension dynamically
-def get_embedding_dimension(embedding_model):
-    """Generate a dummy embedding to detect dimension."""
-    test_vector = embedding_model.embed_query("test")
-    return len(test_vector)
+class GeminiEmbeddings(Embeddings):
+    def embed_query(self, text: str):
+        return genai.embed_content(model="embedding-001", content=text)["embedding"]
+    
+    def embed_documents(self, texts):
+        return [self.embed_query(t) for t in texts]
 
-embedding_model = GeminiEmbeddings()
-expected_dim = get_embedding_dimension(embedding_model)
+# ✅ Initialize LLM Here
+llm = genai.GenerativeModel("gemini-2.5-pro")
 
-# ✅ Check index dimension (Do NOT delete in production)
-index_exists = any(i.name == index_name for i in pc.list_indexes())
-if index_exists:
-    stats = pc.describe_index(index_name)
-    current_dim = getattr(stats, 'dimension', None)
-
-    if current_dim and current_dim != expected_dim:
-        # ❗ Just log warning, do not delete
-        print(f"🚨 Dimension mismatch detected!")
-        print(f"➡️ Index '{index_name}' uses {current_dim}, but embeddings expect {expected_dim}.")
-        print("❗ Please recreate the index manually with the correct dimension.")
-else:
-    # ✅ Create index if missing
-    pc.create_index(
-        name=index_name,
-        dimension=expected_dim,
-        metric="cosine",
-        spec=ServerlessSpec(cloud="aws", region="us-east-1")
-    )
-    print(f"✅ Created Pinecone index '{index_name}' with dimension {expected_dim}")
-
-# ✅ Connect to index
-index = pc.Index(index_name)
-vectorstore = PineconeVectorStore(index, embedding_model, text_key="text")
+# ✅ Then continue with Pinecone setup and rest of code...
