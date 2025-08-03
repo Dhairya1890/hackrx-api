@@ -28,7 +28,7 @@ llm = genai.GenerativeModel("gemini-2.5-pro")
 
 # ✅ Initialize Pinecone
 pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-index_name = "hackrxvector"
+index_name = "hackrxvector-1"
 
 # ✅ Detect embedding dimension dynamically
 def get_embedding_dimension(embedding_model):

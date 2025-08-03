@@ -11,12 +11,12 @@ load_dotenv()
 
 # ✅ Pinecone Setup
 pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-index_name = "hackrxvector"
+index_name = "hackrxvector-1"
 
 if index_name not in [i.name for i in pc.list_indexes()]:
     pc.create_index(
         name=index_name,
-        dimension=768,
+        dimension=1536,
         metric="cosine",
         spec=ServerlessSpec(cloud="aws", region="us-east-1")
     )
