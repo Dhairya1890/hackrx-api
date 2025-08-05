@@ -1,99 +1,91 @@
-from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, Header
-from fastapi.responses import JSONResponse
-import uvicorn
-import logging
 import os
+import json
+import logging
 import requests
+from fastapi import FastAPI, Request, HTTPException, Header
 from dotenv import load_dotenv
-from claim_process import process_claim, process_uploaded_docs
-import tempfile
-import shutil
+from claim_process import process_uploaded_docs, process_claim  # ✅ use your existing pipeline functions
 
-# Load environment variables
+# ✅ Load environment variables
 load_dotenv()
 
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://eos5psqf4l1yvrg.m.pipedream.net")
-EXPECTED_BEARER = os.getenv("TEAM_BEARER_TOKEN")
-
-# Configure logging
+# ✅ Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Insurance Query API", version="2.0.0")
+# ✅ Bearer Token from environment
+EXPECTED_BEARER = os.getenv("TEAM_BEARER_TOKEN")  # <-- must match the one in judging system
 
-# ✅ Health Check Endpoints
-@app.get("/")
-async def root():
-    return {"message": "Insurance Query API is running", "status": "healthy"}
-
-@app.get("/health")
-async def health_check():
-    return {"status": "healthy", "message": "Background processing enabled"}
+app = FastAPI(title="HackRx Retrieval API", version="1.0.0")
 
 
-# ✅ Helper: Authentication
-def check_auth(authorization: str):
-    if not authorization or not authorization.startswith("Bearer "):
+# -------------------- AUTH CHECK -------------------- #
+def verify_bearer(auth_header: str):
+    if not auth_header or not auth_header.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Unauthorized")
-    token = authorization.split(" ")[1]
+    token = auth_header.split(" ")[1]
     if token != EXPECTED_BEARER:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
-# ✅ Background Task to Process
-def background_processing(query, file_url, namespace):
-    try:
-        # If file_url is provided, download and process it
-        file_paths = []
-        if file_url:
-            tmp_dir = tempfile.mkdtemp()
-            local_path = os.path.join(tmp_dir, "uploaded_doc.pdf")
-            r = requests.get(file_url, stream=True)
-            with open(local_path, "wb") as f:
-                shutil.copyfileobj(r.raw, f)
-            file_paths.append(local_path)
-            process_uploaded_docs(file_paths, namespace=namespace)
-
-        # Process query with pipeline
-        decision_json = process_claim(query, namespace=namespace)
-
-        # Send to webhook when complete
-        requests.post(WEBHOOK_URL, json=decision_json)
-        logger.info("✅ Sent results to webhook")
-
-    except Exception as e:
-        logger.error(f"Background processing failed: {e}")
-        requests.post(WEBHOOK_URL, json={"error": str(e)})
+# -------------------- HEALTH ENDPOINT -------------------- #
+@app.get("/")
+async def root():
+    return {"message": "HackRx Retrieval API running", "status": "healthy"}
 
 
-# ✅ Main API Endpoint
+# -------------------- MAIN JUDGING ENDPOINT -------------------- #
 @app.post("/api/v1/hackrx/run")
-async def run_hackrx(request: Request, background_tasks: BackgroundTasks, authorization: str = Header(None)):
-    # 🔐 Authenticate
-    check_auth(authorization)
+async def hackrx_run(request: Request, authorization: str = Header(None)):
+    """
+    Judges will POST here with:
+    {
+        "documents": "<PDF_URL>",
+        "questions": ["q1", "q2", ...]
+    }
+    """
+    # ✅ 1. Verify Bearer Authentication
+    verify_bearer(authorization)
 
     try:
+        # ✅ 2. Parse incoming JSON
         data = await request.json()
-        query = data.get("questions", [])
-        file_url = data.get("documents")
-        namespace = "session1"  # Could also be dynamic
+        pdf_url = data.get("documents")
+        questions = data.get("questions", [])
 
-        if not query:
-            raise HTTPException(status_code=400, detail="Questions are required")
+        if not pdf_url or not questions:
+            raise HTTPException(status_code=400, detail="Missing 'documents' or 'questions'")
 
-        # ✅ Start background task
-        background_tasks.add_task(background_processing, query, file_url, namespace)
+        logger.info(f"📄 Downloading and processing document: {pdf_url}")
 
-        # ✅ Return immediate response
-        return JSONResponse(
-            status_code=200,
-            content={"status": "processing", "message": "Document and queries are being processed."}
-        )
+        # ✅ 3. Download the document to a temporary file
+        local_pdf = "/tmp/input.pdf"
+        r = requests.get(pdf_url)
+        if r.status_code != 200:
+            raise HTTPException(status_code=400, detail="Failed to download PDF from provided URL")
+        with open(local_pdf, "wb") as f:
+            f.write(r.content)
 
+        # ✅ 4. Process document and index it
+        process_uploaded_docs([local_pdf], namespace="judging")
+
+        # ✅ 5. Process each question
+        answers = []
+        for q in questions:
+            logger.info(f"🔍 Processing query: {q}")
+            result = process_claim(q, namespace="judging")
+
+            # result is already JSON → extract only justification text if needed
+            if isinstance(result, dict) and "error" not in result:
+                answers.append(result.get("Justification", json.dumps(result)))
+            else:
+                answers.append(json.dumps(result))
+
+        # ✅ 6. Return final JSON in expected format
+        return {"answers": answers}
+
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Request failed: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+        logger.error(f"❌ Error: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
